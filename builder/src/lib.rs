@@ -19,19 +19,26 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_fields = make_field_option(&fields);
     let field_idents: Vec<&Option<Ident>> = fields.iter().map(|f| &f.ident).collect();
     let builder_methods: Vec<TokenStream2> = fields.iter().map(|f| make_builder_method(f)).collect();
+    let build_method = make_build_method(name, &field_idents);
     let generated = quote! {
+        #[derive(Debug)]
+        pub struct BuilderError(String);
+
+        impl std::fmt::Display for BuilderError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+
+        impl std::error::Error for BuilderError {}
+
         pub struct #builder_name {
             #(#builder_fields),*
         }
 
         impl #builder_name {
             #(#builder_methods)*
-
-            // pub fn build(self) -> #name {
-            //     #name {
-            //         #(#field_idents: self.#field_idents.unwrap()),*
-            //     }
-            // }
+            #build_method
         }
        impl #name {
             pub fn builder() -> #builder_name {
@@ -99,6 +106,26 @@ fn make_builder_method(field: &Field) -> TokenStream2 {
         pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
             self.#ident = Some(#ident);
             self
+        }
+    }
+}
+
+fn make_build_method(name: &Ident, field_idents: &[&Option<Ident>]) -> TokenStream2 {
+    let non_check: Vec<TokenStream2> = field_idents.iter().map(|i| make_none_check(i)).collect();
+    quote! {
+        pub fn build(self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
+            #(#non_check)*
+            Ok(#name {
+                #(#field_idents: self.#field_idents.unwrap()),*
+            })
+        }
+    }
+}
+
+fn make_none_check(ident: &Option<Ident>) -> TokenStream2 {
+    quote! {
+        if self.#ident.is_none() {
+            return Err(Box::new(BuilderError(format!("Missing field: {}", stringify!(#ident)))));
         }
     }
 }
