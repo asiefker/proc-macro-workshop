@@ -56,4 +56,5 @@ fn main() {
     let builder = Command::builder();
 
     let _ = builder;
+    assert_eq!(builder.executable, None);
 }
