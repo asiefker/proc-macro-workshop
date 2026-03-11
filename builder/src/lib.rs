@@ -3,6 +3,7 @@ use quote::{format_ident, quote};
 use syn::Fields::Named;
 use syn::{parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type};
 use syn::__private::TokenStream2;
+use syn::Type::Path;
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -19,7 +20,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let builder_fields = make_field_option(&fields);
     let field_idents: Vec<&Option<Ident>> = fields.iter().map(|f| &f.ident).collect();
     let builder_methods: Vec<TokenStream2> = fields.iter().map(|f| make_builder_method(f)).collect();
-    let build_method = make_build_method(name, &field_idents);
+    let build_method = make_build_method(name, &fields);
     let generated = quote! {
         #[derive(Debug)]
         pub struct BuilderError(String);
@@ -86,11 +87,13 @@ fn extract_fields(ast: &DeriveInput) -> syn::Result<Vec<Field>> {
 }
 
 fn make_field_optional(field: &mut Field) {
+    if is_option(field).is_some() {
+        return;
+    }
     let inner_type = &field.ty; // This is the 'T' in Option<T>
 
     // Use parse_quote! to construct the new Type::Path for Option<T>
     // The `#inner_type` fragment is replaced by the actual type
-    // TODO Skip if already optional...
     let option_type: Type = parse_quote! {
         Option<#inner_type>
     };
@@ -99,9 +102,25 @@ fn make_field_optional(field: &mut Field) {
     field.ty = option_type;
 }
 
+fn is_option(field: &Field) -> Option<&Type> {
+    if let Path(type_path) = &field.ty {
+        if let Some(last_segment) = type_path.path.segments.last() {
+            if last_segment.ident.to_string() == "Option" {
+                // It's an Option, now find the T
+                if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                        return Some(inner_type); // Return the inner type T
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn make_builder_method(field: &Field) -> TokenStream2 {
     let ident = &field.ident;
-    let typ = &field.ty;
+    let typ =  is_option(field).unwrap_or( &field.ty);
     quote!{
         pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
             self.#ident = Some(#ident);
@@ -110,11 +129,16 @@ fn make_builder_method(field: &Field) -> TokenStream2 {
     }
 }
 
-fn make_build_method(name: &Ident, field_idents: &[&Option<Ident>]) -> TokenStream2 {
+fn make_build_method(name: &Ident, fields: &[Field]) -> TokenStream2 {
+    let x1:(Vec<&Field>, Vec<&Field>) = fields.iter().partition(|x| is_option(x).is_some());
+    let (optional, required) = x1;
+    let required_idents: Vec<&Option<Ident>> = required.iter().map(|f| &f.ident).collect();
+    let optional_idents: Vec<&Option<Ident>> = optional.iter().map(|f| &f.ident).collect();
     quote! {
         pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
             Ok(#name {
-                #(#field_idents: self.#field_idents.take().ok_or(BuilderError(format!("Missing field: {}", stringify!(#field_idents))))?),*
+                #(#required_idents: self.#required_idents.take().ok_or(BuilderError(format!("Missing field: {}", stringify!(#required_idents))))?),*,
+                #(#optional_idents: self.#optional_idents.take()),*
             })
         }
     }
