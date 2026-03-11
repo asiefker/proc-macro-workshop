@@ -1,36 +1,25 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::Fields::Named;
 use syn::Type::Path;
-use syn::__private::TokenStream2;
-use syn::{
-    parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type,
-};
+use syn::{parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type};
 
 #[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
-    // println!("{:#?}", ast.ident);
+    derive_impl(ast).unwrap_or_else(|err| err.to_compile_error().into())
+}
+
+fn derive_impl(ast: DeriveInput) -> syn::Result<TokenStream> {
     let name = &ast.ident;
     let builder_name = format_ident!("{}Builder", ast.ident);
-    // println!("{}", builder_name);
 
-    let fields = match extract_fields(&ast) {
-        Ok(value) => value,
-        Err(err) => {
-            return err.to_compile_error().into();
-        }
-    };
-    let builder_field_metas = match fields
+    let fields = extract_fields(&ast)?;
+    let builder_field_metas = fields
         .iter()
         .map(to_builder_field)
-        .collect::<syn::Result<Vec<BuilderFieldMeta>>>()
-    {
-        Ok(value) => value,
-        Err(err) => {
-            return err.to_compile_error().into();
-        }
-    };
+        .collect::<syn::Result<Vec<BuilderFieldMeta>>>()?;
 
     let builder_field_defs: Vec<TokenStream2> = builder_field_metas
         .iter()
@@ -75,22 +64,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
     };
-
-    //eprintln!("TOKENS: {}", generated);
-    generated.into()
+    Ok(generated.into())
 }
 
 fn extract_fields(ast: &DeriveInput) -> syn::Result<Vec<Field>> {
     if let syn::Data::Struct(syn::DataStruct { fields, .. }) = &ast.data {
         match fields {
-            Named(fields_named) => {
-                let builder_fields = fields_named
-                    .named
-                    .pairs()
-                    .map(|field| (*field.value()).clone())
-                    .collect();
-                Ok(builder_fields)
-            }
+            Named(fields_named) => Ok(fields_named.named.iter().cloned().collect()),
             _ => Err(Error::new_spanned(
                 fields,
                 "Builder only supports structs with named fields",
@@ -134,7 +114,10 @@ fn make_build_method(name: &Ident, fields: &[BuilderFieldMeta]) -> TokenStream2 
 }
 
 fn to_builder_field(field: &Field) -> syn::Result<BuilderFieldMeta> {
-    let ident = field.ident.as_ref().unwrap();
+    let ident = field
+        .ident
+        .as_ref()
+        .ok_or_else(|| Error::new_spanned(field, "field must have a name"))?;
     let optional = is_container(field, "Option");
     let inner_ty = optional.unwrap_or(&field.ty);
     let each = parse_builder_each_attr(field)?;
@@ -152,12 +135,18 @@ fn parse_builder_each_attr(field: &Field) -> syn::Result<Option<(Ident, Type)>> 
         return Ok(None);
     };
 
-    let t = is_container(field, "Vec").ok_or(Error::new_spanned(field, "each attribute can only be used on Vec fields"))?;
+    let t = is_container(field, "Vec").ok_or(Error::new_spanned(
+        field,
+        "each attribute can only be used on Vec fields",
+    ))?;
 
     attr.parse_args_with(|input: syn::parse::ParseStream| {
         let key: syn::Ident = input.parse()?;
         if key != "each" {
-            return Err(syn::Error::new_spanned(&attr.meta, "expected `builder(each = \"...\")`"));
+            return Err(syn::Error::new_spanned(
+                &attr.meta,
+                "expected `builder(each = \"...\")`",
+            ));
         }
         input.parse::<syn::Token![=]>()?;
         let name: syn::LitStr = input.parse()?;
@@ -199,23 +188,20 @@ impl BuilderFieldMeta {
         let ident = &self.ident;
         let typ = &self.inner_ty;
         let default_setter = quote! {
-                pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
-                    self.#ident = std::option::Option::Some(#ident);
-                    self
-                }
-            };
+            pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
+                self.#ident = std::option::Option::Some(#ident);
+                self
+            }
+        };
         match &self.each {
             None => default_setter,
             Some((name, v_type)) => {
                 let v_typ = &v_type;
-                if name.eq( ident) {
+                if name.eq(ident) {
                     // replace
                     quote! {
                         pub fn #ident(&mut self, #ident: #v_typ) -> &mut Self {
-                                    if self.#ident.is_none() {
-                                        self.#ident = std::option::Option::Some(Vec::new())
-                                    }
-                                    self.#ident.as_mut().unwrap().push(#ident);
+                            self.#ident.get_or_insert_with(std::vec::Vec::new).push(#name);
                             self
                         }
                     }
@@ -223,15 +209,11 @@ impl BuilderFieldMeta {
                     // Both
                     quote! {
                         pub fn #name(&mut self, #name: #v_typ) -> &mut Self {
-                                    if self.#ident.is_none() {
-                                        self.#ident = std::option::Option::Some(std::vec::Vec::new())
-                                    }
-                                    self.#ident.as_mut().unwrap().push(#name);
+                            self.#ident.get_or_insert_with(std::vec::Vec::new).push(#name);
                             self
                         }
                         #default_setter
                     }
-
                 }
             }
         }
