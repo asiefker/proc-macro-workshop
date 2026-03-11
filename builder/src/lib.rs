@@ -111,21 +111,11 @@ fn make_builder_method(field: &Field) -> TokenStream2 {
 }
 
 fn make_build_method(name: &Ident, field_idents: &[&Option<Ident>]) -> TokenStream2 {
-    let non_check: Vec<TokenStream2> = field_idents.iter().map(|i| make_none_check(i)).collect();
     quote! {
         pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
-            #(#non_check)*
             Ok(#name {
-                #(#field_idents: self.#field_idents.take().unwrap()),*
+                #(#field_idents: self.#field_idents.take().ok_or(BuilderError(format!("Missing field: {}", stringify!(#field_idents))))?),*
             })
-        }
-    }
-}
-
-fn make_none_check(ident: &Option<Ident>) -> TokenStream2 {
-    quote! {
-        if self.#ident.is_none() {
-            return Err(Box::new(BuilderError(format!("Missing field: {}", stringify!(#ident)))));
         }
     }
 }
