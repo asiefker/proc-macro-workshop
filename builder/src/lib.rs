@@ -3,9 +3,11 @@ use quote::{format_ident, quote};
 use syn::Fields::Named;
 use syn::Type::Path;
 use syn::__private::TokenStream2;
-use syn::{parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type};
+use syn::{
+    parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type,
+};
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     // println!("{:#?}", ast.ident);
@@ -19,8 +21,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
             return err.to_compile_error().into();
         }
     };
-    let builder_field_metas: Vec<BuilderFieldMeta> =
-        fields.iter().map(to_builder_field).collect();
+    let builder_field_metas = match fields
+        .iter()
+        .map(to_builder_field)
+        .collect::<syn::Result<Vec<BuilderFieldMeta>>>()
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return err.to_compile_error().into();
+        }
+    };
 
     let builder_field_defs: Vec<TokenStream2> = builder_field_metas
         .iter()
@@ -94,10 +104,12 @@ fn extract_fields(ast: &DeriveInput) -> syn::Result<Vec<Field>> {
     }
 }
 
-fn is_option(field: &Field) -> Option<&Type> {
+/// If field is of expected type, return Some<T>, else None.
+/// For example `Option<String>` returns `Some(String)`.
+fn is_container<'a>(field: &'a Field, expected_type: &str) -> Option<&'a Type> {
     if let Path(type_path) = &field.ty {
         if let Some(last_segment) = type_path.path.segments.last() {
-            if last_segment.ident == "Option" {
+            if last_segment.ident == expected_type {
                 // It's an Option, now find the T
                 if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
@@ -121,26 +133,43 @@ fn make_build_method(name: &Ident, fields: &[BuilderFieldMeta]) -> TokenStream2 
     }
 }
 
-fn to_builder_field(field: &Field) -> BuilderFieldMeta {
+fn to_builder_field(field: &Field) -> syn::Result<BuilderFieldMeta> {
     let ident = field.ident.as_ref().unwrap();
-    let optional = is_option(field);
+    let optional = is_container(field, "Option");
     let inner_ty = optional.unwrap_or(&field.ty);
-    BuilderFieldMeta {
+    let each = parse_builder_each_attr(field)?;
+
+    Ok(BuilderFieldMeta {
         optional: optional.is_some(),
         ident: ident.clone(),
         inner_ty: inner_ty.clone(),
-    }
+        each,
+    })
 }
 
-enum _MultiValue {
-    No,
-    Yes(Ident),
+fn parse_builder_each_attr(field: &Field) -> syn::Result<Option<(Ident, Type)>> {
+    let Some(attr) = field.attrs.iter().find(|a| a.path().is_ident("builder")) else {
+        return Ok(None);
+    };
+
+    let t = is_container(field, "Vec").ok_or(Error::new_spanned(field, "each attribute can only be used on Vec fields"))?;
+
+    attr.parse_args_with(|input: syn::parse::ParseStream| {
+        let key: syn::Ident = input.parse()?;
+        if key != "each" {
+            return Err(syn::Error::new_spanned(key, "expected `each`"));
+        }
+        input.parse::<syn::Token![=]>()?;
+        let name: syn::LitStr = input.parse()?;
+        Ok(Some((format_ident!("{}", name.value()), t.clone())))
+    })
 }
 
 struct BuilderFieldMeta {
     optional: bool,
     ident: Ident,
     inner_ty: Type,
+    each: Option<(Ident, Type)>,
 }
 
 impl BuilderFieldMeta {
@@ -169,10 +198,41 @@ impl BuilderFieldMeta {
     fn generate_setter(&self) -> TokenStream2 {
         let ident = &self.ident;
         let typ = &self.inner_ty;
-        quote! {
-            pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
-                self.#ident = Some(#ident);
-                self
+        let default_setter = quote! {
+                pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
+            };
+        match &self.each {
+            None => default_setter,
+            Some((name, v_type)) => {
+                let v_typ = &v_type;
+                if name.eq( ident) {
+                    // replace
+                    quote! {
+                        pub fn #ident(&mut self, #ident: #v_typ) -> &mut Self {
+                                    if self.#ident.is_none() {
+                                        self.#ident = Some(Vec::new())
+                                    }
+                                    self.#ident.as_mut().unwrap().push(#ident);
+                            self
+                        }
+                    }
+                } else {
+                    // Both
+                    quote! {
+                        pub fn #name(&mut self, #name: #v_typ) -> &mut Self {
+                                    if self.#ident.is_none() {
+                                        self.#ident = Some(Vec::new())
+                                    }
+                                    self.#ident.as_mut().unwrap().push(#name);
+                            self
+                        }
+                        #default_setter
+                    }
+
+                }
             }
         }
     }
