@@ -1,9 +1,9 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::Fields::Named;
-use syn::{parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type};
-use syn::__private::TokenStream2;
 use syn::Type::Path;
+use syn::__private::TokenStream2;
+use syn::{parse_macro_input, parse_quote, DeriveInput, Error, Field, Ident, Type};
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -15,12 +15,27 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     let fields = match extract_fields(&ast) {
         Ok(value) => value,
-        Err(err) => { return err.to_compile_error().into();}
+        Err(err) => {
+            return err.to_compile_error().into();
+        }
     };
-    let builder_fields = make_field_option(&fields);
-    let field_idents: Vec<&Option<Ident>> = fields.iter().map(|f| &f.ident).collect();
-    let builder_methods: Vec<TokenStream2> = fields.iter().map(|f| make_builder_method(f)).collect();
-    let build_method = make_build_method(name, &fields);
+    let builder_field_metas: Vec<BuilderFieldMeta> =
+        fields.iter().map(to_builder_field).collect();
+
+    let builder_field_defs: Vec<TokenStream2> = builder_field_metas
+        .iter()
+        .map(|f| f.generate_builder_field())
+        .collect();
+    let field_idents: Vec<TokenStream2> = builder_field_metas
+        .iter()
+        .map(|f| f.generate_builder_field_init())
+        .collect();
+    let builder_methods: Vec<TokenStream2> = builder_field_metas
+        .iter()
+        .map(|f| f.generate_setter())
+        .collect();
+    let build_method = make_build_method(name, &builder_field_metas);
+
     let generated = quote! {
         #[derive(Debug)]
         pub struct BuilderError(String);
@@ -34,7 +49,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl std::error::Error for BuilderError {}
 
         pub struct #builder_name {
-            #(#builder_fields),*
+            #(#builder_field_defs),*
         }
 
         impl #builder_name {
@@ -44,7 +59,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
        impl #name {
             pub fn builder() -> #builder_name {
                 #builder_name {
-                    #(#field_idents: None),*
+                    #(#field_idents),*
                 }
             }
         }
@@ -54,58 +69,35 @@ pub fn derive(input: TokenStream) -> TokenStream {
     //eprintln!("TOKENS: {}", generated);
     generated.into()
 }
-fn make_field_option(fields: &[Field]) -> Vec<Field>{
-    fields.iter().map(|f|{
-        let mut nf = f.clone();
-        make_field_optional(&mut nf);
-        nf
-    }).collect()
-}
 
 fn extract_fields(ast: &DeriveInput) -> syn::Result<Vec<Field>> {
     if let syn::Data::Struct(syn::DataStruct { fields, .. }) = &ast.data {
         match fields {
             Named(fields_named) => {
-                let builder_fields = fields_named.named.pairs().map(|field| {
-                    (*field.value()).clone()
-                }).collect();
-                return Ok(builder_fields);
-            },
-            _ => {
-                return Err(Error::new_spanned(
-                    fields,
-                    "Builder only supports structs with named fields",
-                ));
+                let builder_fields = fields_named
+                    .named
+                    .pairs()
+                    .map(|field| (*field.value()).clone())
+                    .collect();
+                Ok(builder_fields)
             }
+            _ => Err(Error::new_spanned(
+                fields,
+                "Builder only supports structs with named fields",
+            )),
         }
     } else {
-        return Err(Error::new_spanned(
+        Err(Error::new_spanned(
             ast,
             "Builder can only be derived for structs",
-        ));
+        ))
     }
-}
-
-fn make_field_optional(field: &mut Field) {
-    if is_option(field).is_some() {
-        return;
-    }
-    let inner_type = &field.ty; // This is the 'T' in Option<T>
-
-    // Use parse_quote! to construct the new Type::Path for Option<T>
-    // The `#inner_type` fragment is replaced by the actual type
-    let option_type: Type = parse_quote! {
-        Option<#inner_type>
-    };
-
-    // Update the field's type
-    field.ty = option_type;
 }
 
 fn is_option(field: &Field) -> Option<&Type> {
     if let Path(type_path) = &field.ty {
         if let Some(last_segment) = type_path.path.segments.last() {
-            if last_segment.ident.to_string() == "Option" {
+            if last_segment.ident == "Option" {
                 // It's an Option, now find the T
                 if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
                     if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
@@ -118,28 +110,70 @@ fn is_option(field: &Field) -> Option<&Type> {
     None
 }
 
-fn make_builder_method(field: &Field) -> TokenStream2 {
-    let ident = &field.ident;
-    let typ =  is_option(field).unwrap_or( &field.ty);
-    quote!{
-        pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
-            self.#ident = Some(#ident);
-            self
+fn make_build_method(name: &Ident, fields: &[BuilderFieldMeta]) -> TokenStream2 {
+    let initializers: Vec<TokenStream2> = fields.iter().map(|f| f.generate_initializer()).collect();
+    quote! {
+        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
+            Ok(#name {
+                #(#initializers),*
+            })
         }
     }
 }
 
-fn make_build_method(name: &Ident, fields: &[Field]) -> TokenStream2 {
-    let x1:(Vec<&Field>, Vec<&Field>) = fields.iter().partition(|x| is_option(x).is_some());
-    let (optional, required) = x1;
-    let required_idents: Vec<&Option<Ident>> = required.iter().map(|f| &f.ident).collect();
-    let optional_idents: Vec<&Option<Ident>> = optional.iter().map(|f| &f.ident).collect();
-    quote! {
-        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
-            Ok(#name {
-                #(#required_idents: self.#required_idents.take().ok_or(BuilderError(format!("Missing field: {}", stringify!(#required_idents))))?),*,
-                #(#optional_idents: self.#optional_idents.take()),*
-            })
+fn to_builder_field(field: &Field) -> BuilderFieldMeta {
+    let ident = field.ident.as_ref().unwrap();
+    let optional = is_option(field);
+    let inner_ty = optional.unwrap_or(&field.ty);
+    BuilderFieldMeta {
+        optional: optional.is_some(),
+        ident: ident.clone(),
+        inner_ty: inner_ty.clone(),
+    }
+}
+
+enum _MultiValue {
+    No,
+    Yes(Ident),
+}
+
+struct BuilderFieldMeta {
+    optional: bool,
+    ident: Ident,
+    inner_ty: Type,
+}
+
+impl BuilderFieldMeta {
+    fn generate_builder_field_init(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        quote!(#ident: None)
+    }
+
+    fn generate_initializer(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        if self.optional {
+            quote!(#ident: self.#ident.take())
+        } else {
+            quote!(#ident: self.#ident.take().ok_or(BuilderError(format!("Missing field: {}", stringify!(#ident))))?)
+        }
+    }
+
+    fn generate_builder_field(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let ty = &self.inner_ty;
+        parse_quote! {
+           #ident: Option<#ty>
+        }
+    }
+
+    fn generate_setter(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let typ = &self.inner_ty;
+        quote! {
+            pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
+                self.#ident = Some(#ident);
+                self
+            }
         }
     }
 }
