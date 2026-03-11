@@ -157,7 +157,7 @@ fn parse_builder_each_attr(field: &Field) -> syn::Result<Option<(Ident, Type)>> 
     attr.parse_args_with(|input: syn::parse::ParseStream| {
         let key: syn::Ident = input.parse()?;
         if key != "each" {
-            return Err(syn::Error::new_spanned(key, "expected `each`"));
+            return Err(syn::Error::new_spanned(&attr.meta, "expected `builder(each = \"...\")`"));
         }
         input.parse::<syn::Token![=]>()?;
         let name: syn::LitStr = input.parse()?;
