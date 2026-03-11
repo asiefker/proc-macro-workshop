@@ -125,8 +125,8 @@ fn is_container<'a>(field: &'a Field, expected_type: &str) -> Option<&'a Type> {
 fn make_build_method(name: &Ident, fields: &[BuilderFieldMeta]) -> TokenStream2 {
     let initializers: Vec<TokenStream2> = fields.iter().map(|f| f.generate_initializer()).collect();
     quote! {
-        pub fn build(&mut self) -> Result<#name, Box<dyn std::error::Error + 'static>> {
-            Ok(#name {
+        pub fn build(&mut self) -> std::result::Result<#name, std::boxed::Box<dyn std::error::Error + 'static>> {
+            std::result::Result::Ok(#name {
                 #(#initializers),*
             })
         }
@@ -175,7 +175,7 @@ struct BuilderFieldMeta {
 impl BuilderFieldMeta {
     fn generate_builder_field_init(&self) -> TokenStream2 {
         let ident = &self.ident;
-        quote!(#ident: None)
+        quote!(#ident: std::option::Option::None)
     }
 
     fn generate_initializer(&self) -> TokenStream2 {
@@ -191,7 +191,7 @@ impl BuilderFieldMeta {
         let ident = &self.ident;
         let ty = &self.inner_ty;
         parse_quote! {
-           #ident: Option<#ty>
+           #ident: std::option::Option<#ty>
         }
     }
 
@@ -200,7 +200,7 @@ impl BuilderFieldMeta {
         let typ = &self.inner_ty;
         let default_setter = quote! {
                 pub fn #ident(&mut self, #ident: #typ) -> &mut Self {
-                    self.#ident = Some(#ident);
+                    self.#ident = std::option::Option::Some(#ident);
                     self
                 }
             };
@@ -213,7 +213,7 @@ impl BuilderFieldMeta {
                     quote! {
                         pub fn #ident(&mut self, #ident: #v_typ) -> &mut Self {
                                     if self.#ident.is_none() {
-                                        self.#ident = Some(Vec::new())
+                                        self.#ident = std::option::Option::Some(Vec::new())
                                     }
                                     self.#ident.as_mut().unwrap().push(#ident);
                             self
@@ -224,7 +224,7 @@ impl BuilderFieldMeta {
                     quote! {
                         pub fn #name(&mut self, #name: #v_typ) -> &mut Self {
                                     if self.#ident.is_none() {
-                                        self.#ident = Some(Vec::new())
+                                        self.#ident = std::option::Option::Some(std::vec::Vec::new())
                                     }
                                     self.#ident.as_mut().unwrap().push(#name);
                             self
