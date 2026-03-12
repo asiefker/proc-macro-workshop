@@ -94,21 +94,26 @@ impl VisitMut for MatchSort {
             .arms
             .iter()
             .filter_map(|a| match &a.pat {
-                syn::Pat::TupleStruct(i) => Some(i.path.get_ident().unwrap().clone()),
+                syn::Pat::TupleStruct(i) => Some(&i.path),
+                syn::Pat::Path(i) => Some(&i.path),
+                syn::Pat::Struct(i) => Some(&i.path),
                 _ => None,
             })
             .collect();
-
         let mut sorted_idents = match_idents.clone();
-        sorted_idents.sort();
+        sorted_idents.sort_by_key(path_to_string);
         for (variant, expected) in sorted_idents.iter().zip(&match_idents) {
             if variant != expected {
                 self.result = Some(Error::new_spanned(
                     expected,
-                    format!("{} should sort before {}", expected, variant),
+                    format!("{} should sort before {}", path_to_string(expected), path_to_string(variant)),
                 ));
             }
         }
         visit_mut::visit_expr_match_mut(self, node);
     }
+}
+
+fn path_to_string(path: &&syn::Path) -> String {
+    path.segments.iter().map(|ps| ps.ident.to_string()).collect::<Vec<_>>().join("::")
 }
