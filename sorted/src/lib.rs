@@ -89,15 +89,24 @@ impl VisitMut for MatchSort {
 
         // Remove the attribute from the match
         node.attrs.remove(idx);
+
         // Get the idents from the match arms. Skip other types of Arms.
         let match_idents: Vec<_> = node
             .arms
             .iter()
             .filter_map(|a| match &a.pat {
-                syn::Pat::TupleStruct(i) => Some(&i.path),
+                syn::Pat::TupleStruct(i) => {
+                    eprintln!("path: {:?}", i.path);
+                    Some(&i.path)
+                },
                 syn::Pat::Path(i) => Some(&i.path),
                 syn::Pat::Struct(i) => Some(&i.path),
-                _ => None,
+                x => {
+                    if self.result.is_none() {
+                        self.result = Some(Error::new_spanned(x, "unsupported by #[sorted]"));
+                    }
+                    None
+                },
             })
             .collect();
         let mut sorted_idents = match_idents.clone();
