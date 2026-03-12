@@ -12,7 +12,7 @@ pub fn sorted(args: TokenStream, input: TokenStream) -> TokenStream {
 
 fn sorted_impl(macro_tokens: &TokenStream2, item: Item) -> syn::Result<TokenStream> {
     let Item::Enum(item_enum) = &item else {
-        return Err(Error::new_spanned(
+        return std::result::Result::Err(Error::new_spanned(
             macro_tokens,
             "expected enum or match expression",
         ));
@@ -23,12 +23,12 @@ fn sorted_impl(macro_tokens: &TokenStream2, item: Item) -> syn::Result<TokenStre
 
     for (variant, expected) in item_enum.variants.iter().zip(&sorted) {
         if variant.ident != **expected {
-            return Err(Error::new_spanned(
+            return std::result::Result::Err(Error::new_spanned(
                 expected,
                 format!("{} should sort before {}", expected, variant.ident),
             ));
         }
     }
 
-    Ok(quote! { #item }.into())
+    std::result::Result::Ok(quote! { #item }.into())
 }
