@@ -89,7 +89,6 @@ impl VisitMut for MatchSort {
 
         // Remove the attribute from the match
         node.attrs.remove(idx);
-        eprintln!("Check node: {:?}", node);
         // Get the idents from the match arms. Skip other types of Arms.
         let match_idents: Vec<_> = node
             .arms
