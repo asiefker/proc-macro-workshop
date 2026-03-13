@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use std::fmt::Display;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::visit_mut::{self, VisitMut};
@@ -61,6 +62,38 @@ fn check_impl(macro_tokens: &TokenStream2, mut item: Item) -> syn::Result<TokenS
     Ok(output.into())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MatchPattern {
+    Named(String),
+    Wildcard,
+}
+
+impl Display for MatchPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MatchPattern::Named(name) => write!(f, "{}", name),
+            MatchPattern::Wildcard => write!(f, "_"),
+        }
+    }
+}
+
+impl PartialOrd for MatchPattern {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MatchPattern {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (MatchPattern::Wildcard, MatchPattern::Wildcard) => std::cmp::Ordering::Equal,
+            (MatchPattern::Wildcard, MatchPattern::Named(_)) => std::cmp::Ordering::Greater,
+            (MatchPattern::Named(_), MatchPattern::Wildcard) => std::cmp::Ordering::Less,
+            (MatchPattern::Named(a), MatchPattern::Named(b)) => a.cmp(b),
+        }
+    }
+}
+
 struct MatchSort {
     result: Option<syn::Error>,
 }
@@ -90,39 +123,68 @@ impl VisitMut for MatchSort {
         // Remove the attribute from the match
         node.attrs.remove(idx);
 
-        // Get the idents from the match arms. Skip other types of Arms.
-        let match_idents: Vec<_> = node
+        // Collect patterns with their MatchPattern representation and span for sorting
+        type PatternInfo<'a> = (MatchPattern, &'a dyn quote::ToTokens);
+        let match_patterns: Vec<PatternInfo> = node
             .arms
             .iter()
-            .filter_map(|a| match &a.pat {
-                syn::Pat::TupleStruct(i) => {
-                    eprintln!("path: {:?}", i.path);
-                    Some(&i.path)
-                },
-                syn::Pat::Path(i) => Some(&i.path),
-                syn::Pat::Struct(i) => Some(&i.path),
-                x => {
-                    if self.result.is_none() {
-                        self.result = Some(Error::new_spanned(x, "unsupported by #[sorted]"));
+            .filter_map(|a| {
+                let pattern: Option<PatternInfo> = match &a.pat {
+                    syn::Pat::TupleStruct(i) => {
+                        let name = path_to_string(&&i.path);
+                        Some((MatchPattern::Named(name), &i.path as &dyn quote::ToTokens))
                     }
-                    None
-                },
+                    syn::Pat::Path(i) => {
+                        let name = path_to_string(&&i.path);
+                        Some((MatchPattern::Named(name), &i.path as &dyn quote::ToTokens))
+                    }
+                    syn::Pat::Struct(i) => {
+                        let name = path_to_string(&&i.path);
+                        Some((MatchPattern::Named(name), &i.path as &dyn quote::ToTokens))
+                    }
+                    syn::Pat::Ident(i) => Some((
+                        MatchPattern::Named(i.ident.to_string()),
+                        &i.ident as &dyn quote::ToTokens,
+                    )),
+                    syn::Pat::Wild(w) => Some((MatchPattern::Wildcard, w as &dyn quote::ToTokens)),
+                    x => {
+                        if self.result.is_none() {
+                            self.result = Some(Error::new_spanned(x, "unsupported by #[sorted]"));
+                        }
+                        None
+                    }
+                };
+                pattern
             })
             .collect();
-        let mut sorted_idents = match_idents.clone();
-        sorted_idents.sort_by_key(path_to_string);
-        for (variant, expected) in sorted_idents.iter().zip(&match_idents) {
-            if variant != expected {
+
+        let mut sorted_patterns = match_patterns.clone();
+        sorted_patterns.sort_by_key(|(pattern, _)| pattern.clone());
+
+        for ((expected_pattern, expected_span), (actual_pattern, _)) in
+            sorted_patterns.iter().zip(&match_patterns)
+        {
+            if expected_pattern != actual_pattern {
                 self.result = Some(Error::new_spanned(
-                    expected,
-                    format!("{} should sort before {}", path_to_string(expected), path_to_string(variant)),
+                    *expected_span,
+                    format!(
+                        "{} should sort before {}",
+                        expected_pattern,
+                        actual_pattern
+                    ),
                 ));
+                break;
             }
         }
+
         visit_mut::visit_expr_match_mut(self, node);
     }
 }
 
 fn path_to_string(path: &&syn::Path) -> String {
-    path.segments.iter().map(|ps| ps.ident.to_string()).collect::<Vec<_>>().join("::")
+    path.segments
+        .iter()
+        .map(|ps| ps.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
 }
